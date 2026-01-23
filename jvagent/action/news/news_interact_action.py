@@ -218,16 +218,16 @@ class NewsInteractAction(InteractAction):
                 links_string = "Check out the following links for more information:\n\n" + links_string
                 logger.debug(f"NewsInteractAction: Prepared links: {links_string}")
 
-                await self.publish(
-                    visitor,
-                    content=links_string
-                )
-
-                # await self.respond(
+                # await self.publish(
                 #     visitor,
-                #     directives=[links_directive] if links else None,
-                #     parameters=self.parameters if self.parameters else None
+                #     content=links_string
                 # )
+
+                await self.respond(
+                    visitor,
+                    directives=[links_directive] if links else None,
+                    parameters=self.parameters if self.parameters else None
+                )
             else:
                 directive = self.directive_template.format(summary=summary_content)
 
