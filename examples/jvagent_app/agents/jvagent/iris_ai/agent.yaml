@@ -51,6 +51,11 @@ actions:
       embedding_dimensions: 1536 # Expected dimensions (0 = auto-detect)
       timeout: 30
 
+  - action: jvagent/agent_utils
+    context:
+      enabled: true
+      description: "Agent Utils action for power user controls"
+
   - action: jvagent/intro_interact_action
     context:
       enabled: true
@@ -174,8 +179,8 @@ actions:
       description: "WhatsApp provider (wppconnect, ultramsg, wwebjs)"
       # whatsapp configuration
       provider: "wwebjs"
-      api_url: "http://localhost:21000"
-      # api_url: "https://000zg6h6-21000.brs.devtunnels.ms"
+      # api_url: "http://localhost:21000"
+      api_url: "http://3.140.52.120:3006"
       api_key: "THISISMYSECURETOKEN"
-      session: "NERDWHATS_AMERICA"
-      base_url: "https://68206a62cdb7.ngrok-free.app"
+      session: "test"
+      base_url: "https://501891124a68.ngrok-free.app"
