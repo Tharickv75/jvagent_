@@ -1,5 +1,6 @@
 """Base API module with shared functionality for WhatsApp API wrappers."""
 
+import asyncio
 import base64
 import logging
 import mimetypes
@@ -7,11 +8,144 @@ import os
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, ClassVar
 from dataclasses import dataclass
 
 import aiohttp
 import filetype
+
+
+# ============================================================================
+# CONNECTION POOL MANAGER
+# ============================================================================
+# Provides shared aiohttp ClientSession instances for connection reuse.
+# This significantly improves performance by avoiding TCP handshake overhead
+# for each request.
+#
+# CONFIGURATION RATIONALE:
+# - CONNECTION_POOL_LIMIT (100): Maximum total connections across all hosts.
+#   Sized for typical WhatsApp API usage patterns where multiple concurrent
+#   users may be sending/receiving messages simultaneously.
+#
+# - CONNECTION_POOL_LIMIT_PER_HOST (10): Maximum connections to a single host.
+#   Prevents overwhelming a single WhatsApp API endpoint while allowing
+#   parallelism. Most WhatsApp providers handle 10 concurrent connections well.
+#
+# - SESSION_TIMEOUT_SECONDS (300): Idle session cleanup interval (5 minutes).
+#   Balances keeping connections warm for performance vs resource cleanup.
+#
+# ERROR RECOVERY:
+# - If a pooled connection fails, aiohttp automatically retries with a fresh connection
+# - Sessions are lazily recreated if closed (e.g., server-side disconnect)
+# - DNS is cached for 5 minutes (ttl_dns_cache=300) to reduce lookup overhead
+
+# Connection pool settings
+CONNECTION_POOL_LIMIT = 100  # Max total connections per pool
+CONNECTION_POOL_LIMIT_PER_HOST = 10  # Max connections per individual host
+SESSION_TIMEOUT_SECONDS = 300  # Session idle timeout (5 minutes)
+
+
+class ConnectionPoolManager:
+    """Manages shared aiohttp ClientSession instances for connection pooling.
+    
+    Instead of creating a new ClientSession for each request (which involves
+    TCP handshakes and SSL negotiations), this manager provides shared sessions
+    that can be reused across multiple requests.
+    
+    Thread-safe for concurrent access from multiple async tasks.
+    """
+    
+    _instance: ClassVar[Optional["ConnectionPoolManager"]] = None
+    _lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+    
+    def __init__(self):
+        # Keyed by (api_url, timeout) for isolation between different API endpoints
+        self._sessions: Dict[tuple, aiohttp.ClientSession] = {}
+        self._session_lock = asyncio.Lock()
+    
+    @classmethod
+    async def get_instance(cls) -> "ConnectionPoolManager":
+        """Get the singleton instance (thread-safe)."""
+        if cls._instance is None:
+            async with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+    
+    async def get_session(
+        self,
+        api_url: str,
+        timeout: float = 10.0,
+    ) -> aiohttp.ClientSession:
+        """Get or create a shared ClientSession for the given API URL.
+        
+        Sessions are keyed by (api_url, timeout) to ensure proper isolation
+        between different API endpoints while enabling connection reuse.
+        
+        Args:
+            api_url: Base URL for the API (used as pool key)
+            timeout: Request timeout in seconds
+            
+        Returns:
+            Shared aiohttp ClientSession
+        """
+        # Use domain as key to allow connection reuse for same host
+        from urllib.parse import urlparse
+        parsed = urlparse(api_url)
+        pool_key = (parsed.netloc, int(timeout))
+        
+        async with self._session_lock:
+            # Check if session exists and is still open
+            if pool_key in self._sessions:
+                session = self._sessions[pool_key]
+                if not session.closed:
+                    return session
+                # Session was closed, remove it
+                del self._sessions[pool_key]
+            
+            # Create new session with connection pooling
+            connector = aiohttp.TCPConnector(
+                limit=CONNECTION_POOL_LIMIT,
+                limit_per_host=CONNECTION_POOL_LIMIT_PER_HOST,
+                ttl_dns_cache=300,  # Cache DNS for 5 minutes
+                enable_cleanup_closed=True,
+            )
+            
+            client_timeout = aiohttp.ClientTimeout(total=timeout)
+            
+            session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=client_timeout,
+            )
+            
+            self._sessions[pool_key] = session
+            return session
+    
+    async def close_all(self) -> None:
+        """Close all sessions (call during shutdown)."""
+        async with self._session_lock:
+            for session in self._sessions.values():
+                if not session.closed:
+                    await session.close()
+            self._sessions.clear()
+    
+    async def close_session(self, api_url: str, timeout: float = 10.0) -> None:
+        """Close a specific session."""
+        from urllib.parse import urlparse
+        parsed = urlparse(api_url)
+        pool_key = (parsed.netloc, int(timeout))
+        
+        async with self._session_lock:
+            if pool_key in self._sessions:
+                session = self._sessions.pop(pool_key)
+                if not session.closed:
+                    await session.close()
+
+
+# Global function to get connection pool
+async def get_connection_pool() -> ConnectionPoolManager:
+    """Get the global connection pool manager."""
+    return await ConnectionPoolManager.get_instance()
 
 
 @dataclass
@@ -48,6 +182,41 @@ class MessagePayload:
             self.quoted_message = {}
         if self.contact is None:
             self.contact = {}
+
+
+# ============================================================================
+# STANDARD ERROR RESPONSE HELPERS
+# ============================================================================
+
+def error_response(error: str, status_code: Optional[int] = None) -> Dict[str, Any]:
+    """Create a standardized error response.
+    
+    Args:
+        error: Error message
+        status_code: Optional HTTP status code
+        
+    Returns:
+        Standardized error dict with ok=False
+    """
+    result = {"ok": False, "error": error}
+    if status_code is not None:
+        result["status_code"] = status_code
+    return result
+
+
+def success_response(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create a standardized success response.
+    
+    Args:
+        data: Optional additional data to include
+        
+    Returns:
+        Standardized success dict with ok=True
+    """
+    result = {"ok": True}
+    if data:
+        result.update(data)
+    return result
 
 
 class BaseWhatsAppAPI(ABC):
@@ -103,49 +272,93 @@ class BaseWhatsAppAPI(ABC):
         params: Optional[dict] = None,
         json_body: bool = True,
     ) -> dict:
-        """Internal helper for making HTTP requests with improved error handling."""
-        try:
-            timeout = aiohttp.ClientTimeout(total=self.timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                kwargs = {"headers": headers, "params": params}
-
-                if json_body and data:
-                    kwargs["json"] = data
-                elif data:
-                    kwargs["data"] = data
-
-                async with session.request(method, url, **kwargs) as response:
-                    # Check for HTTP errors
-                    if response.status >= 400:
-                        error_text = await response.text()
-                        self.logger.error(
-                            f"HTTP {response.status} error for {method} {url}: {error_text}"
-                        )
-                        return {
-                            "ok": False, 
-                            "error": f"HTTP {response.status}: {error_text}",
-                            "status_code": response.status
-                        }
-
-                    if response.content_length and response.content_length > 0:
+        """Internal helper for making HTTP requests with connection pooling.
+        
+        Uses a shared ClientSession from the connection pool manager to
+        enable TCP connection reuse across multiple requests, significantly
+        improving performance for high-frequency API calls.
+        
+        Includes retry logic with fresh session on connection failures to
+        handle aiohttp/Python 3.12+ compatibility issues.
+        """
+        kwargs = {"headers": headers, "params": params}
+        if json_body and data:
+            kwargs["json"] = data
+        elif data:
+            kwargs["data"] = data
+        
+        # Helper to safely make request (catches aiohttp/Python 3.12+ bugs)
+        async def safe_request(sess, meth, req_url, **kw):
+            """Wrapper to catch aiohttp errors that bypass normal exception handling."""
+            try:
+                async with sess.request(meth, req_url, **kw) as resp:
+                    status = resp.status
+                    if status >= 400:
+                        err_text = await resp.text()
+                        return {"ok": False, "error": f"HTTP {status}: {err_text}", "status_code": status}
+                    if resp.content_length and resp.content_length > 0:
                         try:
-                            return await response.json()
-                        except Exception as e:
-                            self.logger.warning(f"Failed to parse JSON response: {e}")
-                            raw_content = await response.read()
-                            return {"ok": True, "raw": raw_content}
-
+                            return await resp.json()
+                        except:
+                            return {"ok": True, "raw": await resp.read()}
                     return {"ok": True, "no_content": True}
-
-        except aiohttp.ClientTimeout as e:
-            self.logger.error(f"Request timeout for {method} {url}: {str(e)}")
-            return {"ok": False, "error": f"Request timeout: {str(e)}"}
-        except aiohttp.ClientError as e:
-            self.logger.error(f"Client error for {method} {url}: {str(e)}")
-            return {"ok": False, "error": f"Client error: {str(e)}"}
-        except Exception as e:
-            self.logger.error(f"Unexpected error for {method} {url}: {str(e)}")
-            return {"ok": False, "error": f"Unexpected error: {str(e)}"}
+            except BaseException as e:
+                # Catch ALL exceptions including TypeError from aiohttp bugs
+                return {"ok": False, "error": str(e), "_exception_type": type(e).__name__}
+        
+        # Try with pooled session first, then retry with fresh session on failure
+        for attempt in range(2):
+            session = None
+            fresh_session = False
+            try:
+                if attempt == 0:
+                    # First attempt: use connection pool
+                    pool = await get_connection_pool()
+                    session = await pool.get_session(self.api_url, self.timeout)
+                else:
+                    # Retry with fresh session (bypasses potential pool issues)
+                    self.logger.debug(f"Retrying {method} {url} with fresh session")
+                    connector = aiohttp.TCPConnector(limit=10, force_close=True)
+                    timeout_obj = aiohttp.ClientTimeout(total=self.timeout)
+                    session = aiohttp.ClientSession(connector=connector, timeout=timeout_obj)
+                    fresh_session = True
+                
+                result = await safe_request(session, method, url, **kwargs)
+                
+                # Check if request succeeded or if it's a handled error
+                if result.get("ok") or result.get("status_code"):
+                    return result
+                
+                # Request failed with an error, check if we should retry
+                error = result.get("error", "Unknown error")
+                exc_type = result.get("_exception_type", "")
+                
+                if exc_type == "TypeError" and "BaseException" in error:
+                    # aiohttp/Python 3.12+ connection bug - retry with fresh session
+                    self.logger.warning(f"Connection issue for {method} {url}, attempt {attempt + 1}")
+                    continue
+                elif attempt == 0:
+                    # First attempt failed, try again with fresh session
+                    self.logger.warning(f"Request failed for {method} {url}: {error}, retrying...")
+                    continue
+                else:
+                    # Second attempt also failed
+                    return result
+                    
+            except BaseException as e:
+                # Catch any exception during session setup
+                self.logger.error(f"Error setting up session for {method} {url}: {e}")
+                if attempt == 1:
+                    return {"ok": False, "error": str(e)}
+            finally:
+                if fresh_session and session:
+                    try:
+                        await session.close()
+                    except:
+                        pass
+        
+        # Should not reach here, but just in case
+        return {"ok": False, "error": "Request failed after all retries"}
 
     # Message parsing utilities
     async def parse_inbound_message(self, request: dict) -> Optional[MessagePayload]:
@@ -273,7 +486,7 @@ class BaseWhatsAppAPI(ABC):
         mime_type: Optional[str],
         mime_categories: dict,
     ) -> str:
-        """Internal helper to detect MIME type."""
+        """Internal helper to detect MIME type with connection pooling."""
         if mime_type:
             return mime_type
 
@@ -292,13 +505,14 @@ class BaseWhatsAppAPI(ABC):
                     if f".{ext}" in url:
                         return mime
 
-            # Make HEAD request
+            # Make HEAD request using connection pool
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.head(url, allow_redirects=True) as response:
-                        content_type = response.headers.get("Content-Type")
-                        if content_type:
-                            return content_type.split(";")[0]
+                pool = await get_connection_pool()
+                session = await pool.get_session(url, timeout=10.0)
+                async with session.head(url, allow_redirects=True) as response:
+                    content_type = response.headers.get("Content-Type")
+                    if content_type:
+                        return content_type.split(";")[0]
             except Exception:
                 pass
 
@@ -306,13 +520,16 @@ class BaseWhatsAppAPI(ABC):
 
     @staticmethod
     async def file_url_to_base64(file_url: str, force_prefix: bool = True) -> Optional[str]:
-        """Downloads a file from a URL and returns its base64-encoded content."""
+        """Downloads a file from a URL and returns its base64-encoded content.
+        
+        Uses connection pooling for efficient HTTP requests.
+        """
         try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(file_url) as response:
-                    response.raise_for_status()
-                    content = await response.read()
+            pool = await get_connection_pool()
+            session = await pool.get_session(file_url, timeout=15.0)
+            async with session.get(file_url) as response:
+                response.raise_for_status()
+                content = await response.read()
 
             kind = filetype.guess(content)
             content_type = kind.mime if kind else "application/octet-stream"

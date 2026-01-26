@@ -1,5 +1,6 @@
 """Memory manager node for agent memory, user, and conversation management."""
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -73,6 +74,16 @@ class Memory(Node):
             user.last_seen = datetime.now(timezone.utc)
             await user.save()
             return user
+
+        # User not connected to this Memory node - check if exists globally
+        # This handles orphaned users that exist but lost their edge connection
+        existing_user = await User.find_one({"context.user_id": user_id})
+        if existing_user:
+            # Reconnect the orphaned user to this Memory node
+            await self.connect(existing_user)
+            existing_user.last_seen = datetime.now(timezone.utc)
+            await existing_user.save()
+            return existing_user
 
         if create_if_missing:
             user = await User.create(user_id=user_id)
@@ -208,17 +219,20 @@ class Memory(Node):
             return user, conversation, user_id, conversation.session_id, is_new_user
 
         # Case 4: Both provided - validate and use
+        # Parallelize conversation and user lookups since they're independent
         if user_id and session_id:
-            conversation = await self.get_conversation_by_session(session_id)
+            conversation_task = self.get_conversation_by_session(session_id)
+            user_task = self.get_user(user_id, create_if_missing=False)
+            conversation, user = await asyncio.gather(conversation_task, user_task)
+            
             if not conversation:
                 raise ValueError(f"Session '{session_id}' not found")
+            if not user:
+                raise RuntimeError(f"User '{user_id}' not found")
             if conversation.user_id != user_id:
                 raise ValueError(
                     f"Session '{session_id}' does not belong to user '{user_id}'"
                 )
-            user = await self.get_user(user_id, create_if_missing=False)
-            if not user:
-                raise RuntimeError(f"User '{user_id}' not found")
             return user, conversation, user_id, session_id, False
 
         raise ValueError("Invalid user_id/session_id combination")

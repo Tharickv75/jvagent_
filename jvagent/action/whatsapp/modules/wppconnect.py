@@ -4,11 +4,8 @@ import base64
 from typing import Dict, List, Optional
 
 import aiohttp
-from dotenv import load_dotenv
 
 from .base import BaseWhatsAppAPI
-
-load_dotenv()
 
 
 class WPPConnectAPI(BaseWhatsAppAPI):
@@ -71,19 +68,35 @@ class WPPConnectAPI(BaseWhatsAppAPI):
             status_resp = await self.status()
             status = status_resp.get("status", "").upper()
 
-        # Handle connected state
+        # Handle connected state - update webhook for existing session
         if status == "CONNECTED":
-            start_res = await self.start_session(webhook=webhook_url, wait_qr_code=wait_qr_code)
-            if start_res.get("status") == "CONNECTED":
-                device_info = await self.get_host_device()
-                return {
-                    "status": "CONNECTED",
-                    "message": "Session is already active and connected.",
-                    "device": device_info,
-                    "session": self.session,
-                    "token": self.token,
-                }
-            return start_res
+            # Update webhook URL for the existing session
+            if webhook_url:
+                try:
+                    start_res = await self.start_session(webhook=webhook_url, wait_qr_code=wait_qr_code)
+                    if start_res.get("status") == "CONNECTED":
+                        self.logger.info(
+                            f"Updated webhook URL for existing session '{self.session}'"
+                        )
+                    elif start_res.get("error") or not start_res.get("ok", True):
+                        self.logger.warning(
+                            f"Could not update webhook for existing session '{self.session}': "
+                            f"{start_res.get('error', 'Unknown error')}"
+                        )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Error updating webhook for existing session '{self.session}': {e}"
+                    )
+            
+            # Return success regardless - session is connected
+            device_info = await self.get_host_device()
+            return {
+                "status": "CONNECTED",
+                "message": "Session is already active and connected.",
+                "device": device_info,
+                "session": self.session,
+                "token": self.token,
+            }
 
         # Handle disconnected states
         if status in {"QRCODE", "DISCONNECTED", "CLOSED", ""} and auto_register:
@@ -135,17 +148,23 @@ class WPPConnectAPI(BaseWhatsAppAPI):
         await self.send_rest_request("logout-session")
 
     async def qrcode(self) -> dict:
-        """GET /qrcode-session (base64 encoded image returned)"""
+        """GET /qrcode-session (base64 encoded image returned)
+        
+        Uses connection pooling for efficient HTTP requests.
+        """
+        from .base import get_connection_pool
+        
         url = f"{self.api_url}/{self.session}/qrcode-session"
         headers = {"Authorization": f"Bearer {self.token}"}
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as response:
-                    if response.ok:
-                        content = await response.read()
-                        return {"qrcode_base64": base64.b64encode(content).decode("ascii")}
-                    return {"ok": False, "error": await response.text()}
+            pool = await get_connection_pool()
+            session = await pool.get_session(self.api_url, self.timeout)
+            async with session.get(url, headers=headers) as response:
+                if response.ok:
+                    content = await response.read()
+                    return {"qrcode_base64": base64.b64encode(content).decode("ascii")}
+                return {"ok": False, "error": await response.text()}
         except aiohttp.ClientError as e:
             return {"ok": False, "error": str(e)}
 
