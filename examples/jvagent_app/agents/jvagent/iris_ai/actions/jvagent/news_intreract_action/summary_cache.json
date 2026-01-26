@@ -29,5 +29,14 @@
       "[Collision Incident](http://localhost:8000/api/n/three-killed-wem6)",
       "[Gang Violence in Schools](http://localhost:8000/api/n/no-place-tovx)"
     ]
+  },
+  "2026-01-26": {
+    "summary": "In the news for Mon, 26 Jan 2026, Guyana is buzzing with political activity as MPs gather to elect an Opposition Leader, while the Finance Minister unveils Budget 2026, aiming to kick-start development and address living costs. Meanwhile, crime remains a concern with recent arrests in assaults and robberies, and the government is pushing for clean energy initiatives to lead the energy transition.",
+    "links": [
+      "[Opposition Leader Election](http://localhost:8000/api/n/mps-gathering-lfm2)",
+      "[Budget 2026](http://localhost:8000/api/n/budget-2026-hx8o)",
+      "[Crime Arrests](http://localhost:8000/api/n/teenagers-arrested-rr08)",
+      "[Clean Energy Initiatives](http://localhost:8000/api/n/guyana-in-qis5)"
+    ]
   }
 }

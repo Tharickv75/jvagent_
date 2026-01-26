@@ -17,8 +17,8 @@ from jvspatial.core.annotations import attribute
 from jvagent.action.interact.base import InteractAction
 from jvagent.action.interact.interact_walker import InteractWalker
 from jvagent.action.model.language.base import LanguageModelAction
-from jvagent.action.news.endpoints import news_fetcher, cache_news_summary
-from jvagent.action.news.prompts import DIRECTIVE_TEMPLATE, SUMMARY_TEMPLATE, LINKS_TEMPLATE, DAILY_SUMMARY_TEMPLATE
+from .endpoints import news_fetcher, cache_news_summary
+from .prompts import DIRECTIVE_TEMPLATE, SUMMARY_TEMPLATE, LINKS_TEMPLATE, DAILY_SUMMARY_TEMPLATE
 
 if TYPE_CHECKING:
     from jvagent.memory.interaction import Interaction
@@ -87,6 +87,7 @@ class NewsInteractAction(InteractAction):
         default=[{"condition":"There is no news summary","response": "Apologize and inform the user that you were unable to get the news but they can try again later."}],
         description="A list of conditions and response to customize behavior based on parameters."
     )
+
 
     def __init__(self, *args, **kwargs):
         """Initialize PersonaAction."""
@@ -166,7 +167,7 @@ class NewsInteractAction(InteractAction):
                 logger.info(f"NewsInteractAction: Created cached summary for {check_date}")
             elif target_source or query:
                 # Inform user that we are gathering news articles as this process may take a while
-                self.publish(visitor, content="Please wait while I gather the relevant news articles.")
+                await self.publish(visitor, content="Please wait while I gather the relevant news articles.")
 
                 articles = await news_fetcher.fetch_rss_news(source=target_source)
 
@@ -210,7 +211,8 @@ class NewsInteractAction(InteractAction):
 
                 await self.publish(
                     visitor,
-                    content=summary
+                    content=summary,
+                    message_type="adhoc"
                 )
 
                 links_directive = self.links_template.format(links=links)
@@ -220,7 +222,8 @@ class NewsInteractAction(InteractAction):
 
                 # await self.publish(
                 #     visitor,
-                #     content=links_string
+                #     content=links_string,
+                #     message_type="adhoc"
                 # )
 
                 await self.respond(
@@ -228,7 +231,7 @@ class NewsInteractAction(InteractAction):
                     directives=[links_directive] if links else None,
                     parameters=self.parameters if self.parameters else None
                 )
-            else:
+            elif isinstance(summary_content, str):
                 directive = self.directive_template.format(summary=summary_content)
 
                 await self.respond(
@@ -236,7 +239,6 @@ class NewsInteractAction(InteractAction):
                     directives=[directive],
                     parameters=self.parameters if self.parameters else None
                 )
-
 
         except Exception as e:
             logger.error(f"NewsInteractAction: Error during news fetching and summarization: {e}", exc_info=True)
@@ -258,7 +260,7 @@ class NewsInteractAction(InteractAction):
             if not model_action:
                 return {}
 
-            from jvagent.action.news.prompts import INTENT_EXTRACTION_TEMPLATE
+            from .prompts import INTENT_EXTRACTION_TEMPLATE
             prompt = INTENT_EXTRACTION_TEMPLATE.format(sources=news_fetcher.news_feeds.keys(), current_date=datetime.now().strftime("%a, %d %b %Y"))
 
             # Extract intent

@@ -18,7 +18,7 @@ from jvspatial.core.context import GraphContext
 from jvagent.core.agent import Agent
 from jvspatial.db import get_prime_database
 from jvagent.action.model.language.openai.openai import OpenAILanguageModelAction
-from jvagent.action.news.prompts import SUMMARY_TEMPLATE, INTENT_EXTRACTION_TEMPLATE, DIRECTIVE_TEMPLATE, DAILY_SUMMARY_TEMPLATE
+from .prompts import SUMMARY_TEMPLATE, INTENT_EXTRACTION_TEMPLATE, DIRECTIVE_TEMPLATE, DAILY_SUMMARY_TEMPLATE
 
 from jvspatial.api.auth.api_key_service import APIKeyService
 from jvspatial.api.auth.models import APIKey
@@ -108,7 +108,7 @@ class NewsFetcher:
                 logger.error(f"Scheduled fetch failed: {result['error']}")
             else:
                 logger.info(f"Scheduled fetch successful for {result.get('date')}")
-                from jvagent.action.news.news_interact_action import NewsInteractAction
+                from .news_interact_action import NewsInteractAction
                 news_interact_action = loop.run_until_complete(NewsInteractAction.find_one({
                     "context.enabled": True
                 }))

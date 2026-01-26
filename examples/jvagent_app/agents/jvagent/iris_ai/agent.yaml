@@ -115,9 +115,9 @@ actions:
       description: "WhatsApp provider (wppconnect, ultramsg, wwebjs)"
       # whatsapp configuration
       provider: "wwebjs"
-      api_url: "http://3.140.52.120:3080"
+      api_url: "http://localhost:21004"
       api_key: ${WHATSAPP_API_KEY}
-      session: "JV_IRIS_AI"
+      session: "IRIS"
       base_url: ${BASE_URL}
 
 
